@@ -1,0 +1,8 @@
+/build/
+/out/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite.downloads/
+work/
+

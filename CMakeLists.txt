@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.20)
+project(MineTrack VERSION 1.0.0 LANGUAGES CXX)
+
+find_package(SQLite3 3.26 REQUIRED)
+find_package(Threads REQUIRED)
+add_executable(minetrack src/main.cpp src/database.cpp src/sync.cpp src/candles.cpp src/timeframe.cpp src/smoothing.cpp src/chart.cpp)
+target_include_directories(minetrack SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+target_compile_features(minetrack PRIVATE cxx_std_20)
+set_target_properties(minetrack PROPERTIES CXX_EXTENSIONS OFF)
+target_link_libraries(minetrack PRIVATE SQLite::SQLite3 Threads::Threads)
+
+if(MSVC)
+    target_compile_options(minetrack PRIVATE /W4 /permissive- /utf-8)
+else()
+    target_compile_options(minetrack PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+if(MINGW)
+    target_link_options(minetrack PRIVATE -municode)
+endif()
+
+install(TARGETS minetrack RUNTIME DESTINATION bin)
+install(FILES README.md DESTINATION share/minetrack)
+install(FILES third_party/stb/LICENSE third_party/stb/UPSTREAM.txt DESTINATION share/minetrack/stb)
