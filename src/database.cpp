@@ -666,6 +666,56 @@ std::vector<Candle> Database::candles(std::string_view host, Integer from, Integ
     find.bind(1, host);
     if (!find.next()) throw std::runtime_error("Unknown hostname: " + std::string(host));
     const Integer host_id = find.integer(0);
+    const bool calendar_period = options.period.unit == Interval::Unit::week ||
+        options.period.unit == Interval::Unit::month || options.period.unit == Interval::Unit::year;
+    if (options.method == "none" && (calendar_period ||
+        (options.period.milliseconds() >= day_ms && options.period.milliseconds() % day_ms == 0))) {
+        // Exact raw OHLC: extrema/counts come from existing daily summaries;
+        // only clipped days, zero minima and endpoint samples require raw reads.
+        std::vector<Candle> result;
+        Statement days(db_, "SELECT day,samples-failed-ambiguous,low,high FROM daily WHERE host_id=?1 AND day BETWEEN ?2 AND ?3 ORDER BY day");
+        days.bind(1, host_id); days.bind(2, from / day_ms); days.bind(3, (to-1)/day_ms);
+        Statement exact(db_, "SELECT count(*),min(players),max(players) FROM samples WHERE timestamp_ms>=?1 AND timestamp_ms<?2 AND host_id=?3 AND players>0");
+        while (days.next()) {
+            const Integer start = std::max(from, days.integer(0)*day_ms);
+            const Integer stop = std::min(to, (days.integer(0)+1)*day_ms);
+            Integer count=days.integer(1), low=days.integer(2), high=days.integer(3);
+            if (low == 0 || start % day_ms || stop % day_ms) {
+                exact.bind(1,start); exact.bind(2,stop); exact.bind(3,host_id);
+                if (exact.next()) { count=exact.integer(0); low=exact.integer(1); high=exact.integer(2); }
+                exact.reset();
+            }
+            if (count<=0) continue;
+            const auto [begin,end]=options.period.bounds(start);
+            if (result.empty() || result.back().begin!=begin)
+                result.push_back({options.period.label(begin),begin,end,start,stop-1,0,double(high),double(low),0,0,0,0});
+            auto& c=result.back();
+            c.high=std::max(c.high,double(high)); c.low=std::min(c.low,double(low));
+            ++c.days; c.samples+=count; c.points+=count;
+        }
+        std::optional<double> previous;
+        Statement prior(db_, "SELECT players FROM samples WHERE timestamp_ms<?1 AND host_id=?2 AND players>0 ORDER BY timestamp_ms DESC,host_id DESC,players DESC LIMIT 1");
+        prior.bind(1,options.period.bounds(from).first); prior.bind(2,host_id);
+        if (prior.next()) previous=double(prior.integer(0));
+        for (std::size_t i=0;i<result.size();++i) {
+            auto& c=result[i];
+            const Integer start=std::max(from,c.begin), stop=std::min(to,c.end);
+            for (bool reverse : {false,true}) {
+                const std::string order=reverse ? " DESC,host_id DESC,players DESC" : ",host_id,players";
+                Statement edge(db_,("SELECT timestamp_ms,players FROM samples WHERE timestamp_ms>=?1 AND timestamp_ms<?2 AND host_id=?3 AND players>0 ORDER BY timestamp_ms"+order+" LIMIT 1").c_str());
+                edge.bind(1,start);edge.bind(2,stop);edge.bind(3,host_id);
+                if (!edge.next()) throw std::runtime_error("Missing raw OHLC endpoint");
+                if (reverse) {c.last=edge.integer(0);c.close=double(edge.integer(1));}
+                else {c.first=edge.integer(0);c.open=previous.value_or(double(edge.integer(1)));}
+            }
+            c.high=std::max(c.high,c.open);c.low=std::min(c.low,c.open);previous=c.close;
+            if ((i+1)%100==0) std::cerr << "Raw OHLC: " << i+1 << '/' << result.size() << " periods\n";
+        }
+        if(options.limit>0 && result.size()>static_cast<std::size_t>(options.limit))
+            result.erase(result.begin(),result.end()-options.limit);
+        snapshot.commit();
+        return result;
+    }
     CandleBuilder builder(options, from);
     const auto consume = [&](const MeanPoint& point) { builder.add(point); };
     if (options.base.unit != Interval::Unit::day || options.base.count != 1) {
